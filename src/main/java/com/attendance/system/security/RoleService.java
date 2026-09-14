@@ -1,4 +1,3 @@
-
 package com.attendance.system.security;
 
 import com.attendance.system.entity.User;
@@ -116,6 +115,32 @@ public class RoleService {
             }
 
             return "student".equals(user.getRole());
+
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    public boolean isHOD(Authentication authentication) {
+
+        if (!(authentication.getPrincipal() instanceof Jwt jwt)) {
+            return false;
+        }
+
+        try {
+            UUID userId = UUID.fromString(jwt.getSubject());
+
+            User user = userRepository.findById(userId).orElse(null);
+
+            if (user == null) {
+                return false;
+            }
+
+            if (!"active".equals(user.getStatus())) {
+                return false;
+            }
+
+            return "hod".equals(user.getRole());
 
         } catch (IllegalArgumentException e) {
             return false;

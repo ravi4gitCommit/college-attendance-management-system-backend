@@ -4,6 +4,7 @@ import com.attendance.system.entity.Department;
 import com.attendance.system.entity.RecordStatus;
 import com.attendance.system.entity.TimetableSlot;
 import com.attendance.system.entity.User;
+import com.attendance.system.repository.DepartmentHodAssignmentRepository;
 import com.attendance.system.repository.DepartmentRepository;
 import com.attendance.system.repository.TeacherAssignmentRepository;
 import com.attendance.system.repository.TeacherRepository;
@@ -23,6 +24,7 @@ public class TimetableSlotService {
     private final TeacherAssignmentRepository teacherAssignmentRepository;
     private final TeacherRepository teacherRepository;
     private final DepartmentRepository departmentRepository;
+    private final DepartmentHodAssignmentRepository departmentHodAssignmentRepository;
     private final UserService userService;
 
     public TimetableSlotService(
@@ -30,12 +32,15 @@ public class TimetableSlotService {
             TeacherAssignmentRepository teacherAssignmentRepository,
             TeacherRepository teacherRepository,
             DepartmentRepository departmentRepository,
+            DepartmentHodAssignmentRepository departmentHodAssignmentRepository,
             UserService userService
     ) {
         this.timetableSlotRepository = timetableSlotRepository;
         this.teacherAssignmentRepository = teacherAssignmentRepository;
         this.teacherRepository = teacherRepository;
         this.departmentRepository = departmentRepository;
+        this.departmentHodAssignmentRepository =
+                departmentHodAssignmentRepository;
         this.userService = userService;
     }
 
@@ -183,6 +188,128 @@ public class TimetableSlotService {
         return deleteSlot(id);
     }
 
+    // Get all timetable slots belonging to the HOD's department
+    public List<TimetableSlot> getAllSlotsForHod(
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        return timetableSlotRepository.findAll()
+                .stream()
+                .filter(slot ->
+                        isTimetableSlotInDepartment(
+                                slot,
+                                departmentId
+                        )
+                )
+                .toList();
+    }
+
+    // Get one timetable slot only if it belongs to the HOD's department
+    public Optional<TimetableSlot> getSlotByIdForHod(
+            Long id,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        return timetableSlotRepository.findById(id)
+                .filter(slot ->
+                        isTimetableSlotInDepartment(
+                                slot,
+                                departmentId
+                        )
+                );
+    }
+
+    // Create timetable slot only for an assignment in the HOD's department
+    public TimetableSlot createSlotForHod(
+            TimetableSlot slot,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        if (slot.getTeacherAssignmentId() == null) {
+            throw new IllegalArgumentException(
+                    "teacherAssignmentId is required"
+            );
+        }
+
+        if (!isAssignmentInDepartment(
+                slot.getTeacherAssignmentId(),
+                departmentId
+        )) {
+            throw new AccessDeniedException(
+                    "Teacher assignment does not belong to your department"
+            );
+        }
+
+        return createSlot(slot);
+    }
+
+    // Update timetable slot only inside the HOD's department
+    public Optional<TimetableSlot> updateSlotForHod(
+            Long id,
+            TimetableSlot updatedSlot,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        Optional<TimetableSlot> existingSlot =
+                timetableSlotRepository.findById(id);
+
+        if (existingSlot.isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (!isTimetableSlotInDepartment(
+                existingSlot.get(),
+                departmentId
+        )) {
+            return Optional.empty();
+        }
+
+        if (updatedSlot.getTeacherAssignmentId() == null) {
+            throw new IllegalArgumentException(
+                    "teacherAssignmentId is required"
+            );
+        }
+
+        if (!isAssignmentInDepartment(
+                updatedSlot.getTeacherAssignmentId(),
+                departmentId
+        )) {
+            throw new AccessDeniedException(
+                    "Teacher assignment does not belong to your department"
+            );
+        }
+
+        return updateSlot(id, updatedSlot);
+    }
+
+    // Delete timetable slot only inside the HOD's department
+    public boolean deleteSlotForHod(
+            Long id,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        Optional<TimetableSlot> existingSlot =
+                timetableSlotRepository.findById(id);
+
+        if (existingSlot.isEmpty()) {
+            return false;
+        }
+
+        if (!isTimetableSlotInDepartment(
+                existingSlot.get(),
+                departmentId
+        )) {
+            return false;
+        }
+
+        return deleteSlot(id);
+    }
+
     public TimetableSlot createSlot(TimetableSlot slot) {
 
         validateSlot(slot);
@@ -282,6 +409,38 @@ public class TimetableSlotService {
         return admin.getCollegeId();
     }
 
+    private Long getHodDepartmentId(UUID hodUserId) {
+
+        User hod = userService
+                .findById(hodUserId)
+                .orElseThrow(() ->
+                        new AccessDeniedException(
+                                "HOD user not found"
+                        ));
+
+        if (!"hod".equals(hod.getRole())) {
+            throw new AccessDeniedException(
+                    "User is not an HOD"
+            );
+        }
+
+        if (!"active".equals(hod.getStatus())) {
+            throw new AccessDeniedException(
+                    "HOD user is not active"
+            );
+        }
+
+        return departmentHodAssignmentRepository
+                .findActiveDepartmentIdByHodUserId(
+                        hodUserId,
+                        LocalDate.now()
+                )
+                .orElseThrow(() ->
+                        new AccessDeniedException(
+                                "HOD is not assigned to an active department"
+                        ));
+    }
+
     private boolean isAssignmentInCollege(
             Long teacherAssignmentId,
             Long collegeId
@@ -303,6 +462,23 @@ public class TimetableSlotService {
                 .orElse(false);
     }
 
+    private boolean isAssignmentInDepartment(
+            Long teacherAssignmentId,
+            Long departmentId
+    ) {
+        return teacherAssignmentRepository
+                .findById(teacherAssignmentId)
+                .flatMap(assignment ->
+                        teacherRepository.findById(
+                                assignment.getTeacherId()
+                        ))
+                .map(teacher ->
+                        departmentId.equals(
+                                teacher.getDepartmentId()
+                        ))
+                .orElse(false);
+    }
+
     private boolean isTimetableSlotInCollege(
             TimetableSlot slot,
             Long collegeId
@@ -310,6 +486,16 @@ public class TimetableSlotService {
         return isAssignmentInCollege(
                 slot.getTeacherAssignmentId(),
                 collegeId
+        );
+    }
+
+    private boolean isTimetableSlotInDepartment(
+            TimetableSlot slot,
+            Long departmentId
+    ) {
+        return isAssignmentInDepartment(
+                slot.getTeacherAssignmentId(),
+                departmentId
         );
     }
 

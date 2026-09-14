@@ -3,26 +3,38 @@ package com.attendance.system.service;
 import com.attendance.system.entity.Department;
 import com.attendance.system.entity.RecordStatus;
 import com.attendance.system.entity.Subject;
+import com.attendance.system.entity.User;
+import com.attendance.system.repository.DepartmentHodAssignmentRepository;
 import com.attendance.system.repository.DepartmentRepository;
 import com.attendance.system.repository.SubjectRepository;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 public class SubjectService {
 
     private final SubjectRepository subjectRepository;
     private final DepartmentRepository departmentRepository;
+    private final DepartmentHodAssignmentRepository departmentHodAssignmentRepository;
+    private final UserService userService;
 
     public SubjectService(
             SubjectRepository subjectRepository,
-            DepartmentRepository departmentRepository
+            DepartmentRepository departmentRepository,
+            DepartmentHodAssignmentRepository departmentHodAssignmentRepository,
+            UserService userService
     ) {
         this.subjectRepository = subjectRepository;
         this.departmentRepository = departmentRepository;
+        this.departmentHodAssignmentRepository =
+                departmentHodAssignmentRepository;
+        this.userService = userService;
     }
 
     // Get all subjects belonging only to the logged-in admin's college.
@@ -195,6 +207,192 @@ public class SubjectService {
         subjectRepository.delete(subject.get());
 
         return true;
+    }
+
+    // =========================================================
+    // HOD SUBJECT METHODS
+    // =========================================================
+
+    // Get all subjects belonging to the HOD's currently assigned department.
+    public List<Subject> getAllSubjectsForHod(UUID hodUserId) {
+
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        return subjectRepository.findByDepartmentId(departmentId);
+    }
+
+    // Get one subject only when it belongs to the HOD's department.
+    public Optional<Subject> getSubjectByIdForHod(
+            Long id,
+            UUID hodUserId
+    ) {
+
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        return subjectRepository.findById(id)
+                .filter(subject ->
+                        departmentId.equals(subject.getDepartmentId())
+                );
+    }
+
+    // HOD can create a subject only inside their own department.
+    public Subject createSubjectForHod(
+            Subject subject,
+            UUID hodUserId
+    ) {
+
+        Long hodDepartmentId = getHodDepartmentId(hodUserId);
+
+        if (subject.getDepartmentId() == null) {
+            throw new IllegalArgumentException(
+                    "Department is required"
+            );
+        }
+
+        if (!hodDepartmentId.equals(subject.getDepartmentId())) {
+            throw new AccessDeniedException(
+                    "Subject must belong to your department"
+            );
+        }
+
+        if (subjectRepository.existsByDepartmentIdAndCodeIgnoreCase(
+                hodDepartmentId,
+                subject.getCode()
+        )) {
+            throw new IllegalArgumentException(
+                    "Subject code already exists in this department"
+            );
+        }
+
+        if (subject.getStatus() == null) {
+            subject.setStatus(RecordStatus.active);
+        }
+
+        return subjectRepository.save(subject);
+    }
+
+    // HOD can update only a subject belonging to their department.
+    public Optional<Subject> updateSubjectForHod(
+            Long id,
+            Subject updatedSubject,
+            UUID hodUserId
+    ) {
+
+        Long hodDepartmentId = getHodDepartmentId(hodUserId);
+
+        return subjectRepository.findById(id)
+                .filter(existingSubject ->
+                        hodDepartmentId.equals(
+                                existingSubject.getDepartmentId()
+                        )
+                )
+                .map(existingSubject -> {
+
+                    if (updatedSubject.getDepartmentId() == null) {
+                        throw new IllegalArgumentException(
+                                "Department is required"
+                        );
+                    }
+
+                    if (!hodDepartmentId.equals(
+                            updatedSubject.getDepartmentId()
+                    )) {
+                        throw new AccessDeniedException(
+                                "Subject must belong to your department"
+                        );
+                    }
+
+                    boolean codeChanged =
+                            !existingSubject.getCode()
+                                    .equalsIgnoreCase(
+                                            updatedSubject.getCode()
+                                    );
+
+                    if (codeChanged &&
+                            subjectRepository
+                                    .existsByDepartmentIdAndCodeIgnoreCase(
+                                            hodDepartmentId,
+                                            updatedSubject.getCode()
+                                    )) {
+
+                        throw new IllegalArgumentException(
+                                "Subject code already exists in this department"
+                        );
+                    }
+
+                    existingSubject.setDepartmentId(hodDepartmentId);
+                    existingSubject.setName(updatedSubject.getName());
+                    existingSubject.setCode(updatedSubject.getCode());
+                    existingSubject.setCredits(updatedSubject.getCredits());
+                    existingSubject.setType(updatedSubject.getType());
+
+                    if (updatedSubject.getStatus() != null) {
+                        existingSubject.setStatus(
+                                updatedSubject.getStatus()
+                        );
+                    }
+
+                    return subjectRepository.save(existingSubject);
+                });
+    }
+
+    // HOD can delete only a subject belonging to their department.
+    public boolean deleteSubjectForHod(
+            Long id,
+            UUID hodUserId
+    ) {
+
+        Long hodDepartmentId = getHodDepartmentId(hodUserId);
+
+        Optional<Subject> subject =
+                subjectRepository.findById(id)
+                        .filter(existingSubject ->
+                                hodDepartmentId.equals(
+                                        existingSubject.getDepartmentId()
+                                )
+                        );
+
+        if (subject.isEmpty()) {
+            return false;
+        }
+
+        subjectRepository.delete(subject.get());
+
+        return true;
+    }
+
+    // Resolve the HOD's currently active department assignment.
+    private Long getHodDepartmentId(UUID hodUserId) {
+
+        User hod = userService.findById(hodUserId)
+                .orElseThrow(() ->
+                        new AccessDeniedException(
+                                "HOD user not found"
+                        )
+                );
+
+        if (!"hod".equals(hod.getRole())) {
+            throw new AccessDeniedException(
+                    "User is not an HOD"
+            );
+        }
+
+        if (!"active".equals(hod.getStatus())) {
+            throw new AccessDeniedException(
+                    "HOD user is not active"
+            );
+        }
+
+        return departmentHodAssignmentRepository
+                .findActiveDepartmentIdByHodUserId(
+                        hodUserId,
+                        LocalDate.now()
+                )
+                .orElseThrow(() ->
+                        new AccessDeniedException(
+                                "HOD has no active department assignment"
+                        )
+                );
     }
 
     // Common ownership check.

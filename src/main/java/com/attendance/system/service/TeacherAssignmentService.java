@@ -8,6 +8,7 @@ import com.attendance.system.entity.Teacher;
 import com.attendance.system.entity.TeacherAssignment;
 import com.attendance.system.entity.User;
 import com.attendance.system.repository.ClassSessionRepository;
+import com.attendance.system.repository.DepartmentHodAssignmentRepository;
 import com.attendance.system.repository.DepartmentRepository;
 import com.attendance.system.repository.ExtraClassRequestRepository;
 import com.attendance.system.repository.ProgramRepository;
@@ -18,6 +19,7 @@ import com.attendance.system.repository.TimetableSlotRepository;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -32,6 +34,7 @@ public class TeacherAssignmentService {
     private final SubjectOfferingRepository subjectOfferingRepository;
     private final ProgramRepository programRepository;
     private final UserService userService;
+    private final DepartmentHodAssignmentRepository departmentHodAssignmentRepository;
 
     private final ClassSessionRepository classSessionRepository;
     private final ExtraClassRequestRepository extraClassRequestRepository;
@@ -44,6 +47,7 @@ public class TeacherAssignmentService {
             SubjectOfferingRepository subjectOfferingRepository,
             ProgramRepository programRepository,
             UserService userService,
+            DepartmentHodAssignmentRepository departmentHodAssignmentRepository,
             ClassSessionRepository classSessionRepository,
             ExtraClassRequestRepository extraClassRequestRepository,
             TimetableSlotRepository timetableSlotRepository
@@ -54,6 +58,8 @@ public class TeacherAssignmentService {
         this.subjectOfferingRepository = subjectOfferingRepository;
         this.programRepository = programRepository;
         this.userService = userService;
+        this.departmentHodAssignmentRepository =
+                departmentHodAssignmentRepository;
         this.classSessionRepository = classSessionRepository;
         this.extraClassRequestRepository = extraClassRequestRepository;
         this.timetableSlotRepository = timetableSlotRepository;
@@ -250,6 +256,312 @@ public class TeacherAssignmentService {
         }
 
         return deleteAssignment(id);
+    }
+
+    /*
+     * ============================================================
+     * HOD-SCOPED TEACHER ASSIGNMENT METHODS
+     * ============================================================
+     *
+     * HOD can manage teacher assignments only inside the HOD's
+     * currently active department.
+     *
+     * Required relationship:
+     *
+     * HOD Department
+     *      ==
+     * Teacher Department
+     *      ==
+     * Subject Offering Department
+     */
+
+    public List<TeacherAssignment> getAllAssignmentsForHod(
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        return teacherAssignmentRepository.findAll()
+                .stream()
+                .filter(assignment ->
+                        isAssignmentInDepartment(
+                                assignment,
+                                departmentId
+                        ))
+                .toList();
+    }
+
+    public Optional<TeacherAssignment> getAssignmentByIdForHod(
+            Long id,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        return teacherAssignmentRepository.findById(id)
+                .filter(assignment ->
+                        isAssignmentInDepartment(
+                                assignment,
+                                departmentId
+                        ));
+    }
+
+    public TeacherAssignment createAssignmentForHod(
+            TeacherAssignment assignment,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        validateTeacherBelongsToDepartment(
+                assignment.getTeacherId(),
+                departmentId
+        );
+
+        validateSubjectOfferingBelongsToDepartment(
+                assignment.getSubjectOfferingId(),
+                departmentId
+        );
+
+        validateNoActiveDuplicateAssignment(
+                assignment.getTeacherId(),
+                assignment.getSubjectOfferingId()
+        );
+
+        return createAssignment(assignment);
+    }
+
+    public Optional<TeacherAssignment> updateAssignmentForHod(
+            Long id,
+            TeacherAssignment updatedAssignment,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        Optional<TeacherAssignment> existing =
+                teacherAssignmentRepository.findById(id);
+
+        if (existing.isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (!isAssignmentInDepartment(
+                existing.get(),
+                departmentId
+        )) {
+            return Optional.empty();
+        }
+
+        validateTeacherBelongsToDepartment(
+                updatedAssignment.getTeacherId(),
+                departmentId
+        );
+
+        validateSubjectOfferingBelongsToDepartment(
+                updatedAssignment.getSubjectOfferingId(),
+                departmentId
+        );
+
+        validateNoActiveDuplicateAssignmentForUpdate(
+                id,
+                updatedAssignment.getTeacherId(),
+                updatedAssignment.getSubjectOfferingId()
+        );
+
+        return updateAssignment(
+                id,
+                updatedAssignment
+        );
+    }
+
+    public boolean deleteAssignmentForHod(
+            Long id,
+            UUID hodUserId
+    ) {
+        Long departmentId = getHodDepartmentId(hodUserId);
+
+        Optional<TeacherAssignment> assignment =
+                teacherAssignmentRepository.findById(id);
+
+        if (assignment.isEmpty()) {
+            return false;
+        }
+
+        if (!isAssignmentInDepartment(
+                assignment.get(),
+                departmentId
+        )) {
+            return false;
+        }
+
+        return deleteAssignment(id);
+    }
+
+    private Long getHodDepartmentId(UUID hodUserId) {
+
+        User hod = userService.findById(hodUserId)
+                .orElseThrow(() ->
+                        new AccessDeniedException(
+                                "HOD user not found"
+                        ));
+
+        if (!"hod".equals(hod.getRole())) {
+            throw new AccessDeniedException(
+                    "User is not an HOD"
+            );
+        }
+
+        if (!"active".equals(hod.getStatus())) {
+            throw new AccessDeniedException(
+                    "HOD user is not active"
+            );
+        }
+
+        return departmentHodAssignmentRepository
+                .findActiveDepartmentIdByHodUserId(
+                        hodUserId,
+                        LocalDate.now()
+                )
+                .orElseThrow(() ->
+                        new AccessDeniedException(
+                                "HOD has no active department assignment"
+                        ));
+    }
+
+    private boolean isAssignmentInDepartment(
+            TeacherAssignment assignment,
+            Long departmentId
+    ) {
+        Teacher teacher = teacherRepository.findById(
+                assignment.getTeacherId()
+        ).orElse(null);
+
+        if (teacher == null) {
+            return false;
+        }
+
+        if (!departmentId.equals(
+                teacher.getDepartmentId()
+        )) {
+            return false;
+        }
+
+        return isSubjectOfferingInDepartment(
+                assignment.getSubjectOfferingId(),
+                departmentId
+        );
+    }
+
+    private boolean isSubjectOfferingInDepartment(
+            Long subjectOfferingId,
+            Long departmentId
+    ) {
+        SubjectOffering offering =
+                subjectOfferingRepository.findById(
+                        subjectOfferingId
+                ).orElse(null);
+
+        if (offering == null) {
+            return false;
+        }
+
+        Program program =
+                programRepository.findById(
+                        offering.getProgramId()
+                ).orElse(null);
+
+        if (program == null) {
+            return false;
+        }
+
+        return departmentId.equals(
+                program.getDepartmentId()
+        );
+    }
+
+    private void validateTeacherBelongsToDepartment(
+            Long teacherId,
+            Long departmentId
+    ) {
+        Teacher teacher = teacherRepository.findById(
+                teacherId
+        ).orElseThrow(() ->
+                new IllegalArgumentException(
+                        "Teacher not found"
+                ));
+
+        if (!departmentId.equals(
+                teacher.getDepartmentId()
+        )) {
+            throw new AccessDeniedException(
+                    "Teacher does not belong to HOD's department"
+            );
+        }
+    }
+
+    private void validateSubjectOfferingBelongsToDepartment(
+            Long subjectOfferingId,
+            Long departmentId
+    ) {
+        if (!isSubjectOfferingInDepartment(
+                subjectOfferingId,
+                departmentId
+        )) {
+            throw new AccessDeniedException(
+                    "Subject offering does not belong to HOD's department"
+            );
+        }
+    }
+
+    private void validateNoActiveDuplicateAssignment(
+            Long teacherId,
+            Long subjectOfferingId
+    ) {
+        if (teacherAssignmentRepository
+                .existsByTeacherIdAndSubjectOfferingIdAndStatus(
+                        teacherId,
+                        subjectOfferingId,
+                        AssignmentStatus.active
+                )) {
+            throw new IllegalArgumentException(
+                    "Active teacher assignment already exists"
+            );
+        }
+    }
+
+    private void validateNoActiveDuplicateAssignmentForUpdate(
+            Long id,
+            Long teacherId,
+            Long subjectOfferingId
+    ) {
+        boolean duplicate =
+                teacherAssignmentRepository
+                        .existsByTeacherIdAndSubjectOfferingIdAndStatus(
+                                teacherId,
+                                subjectOfferingId,
+                                AssignmentStatus.active
+                        );
+
+        if (!duplicate) {
+            return;
+        }
+
+        TeacherAssignment existing =
+                teacherAssignmentRepository.findById(id)
+                        .orElse(null);
+
+        if (existing == null) {
+            return;
+        }
+
+        boolean sameAssignment =
+                teacherId.equals(existing.getTeacherId())
+                        && subjectOfferingId.equals(
+                        existing.getSubjectOfferingId()
+                );
+
+        if (!sameAssignment) {
+            throw new IllegalArgumentException(
+                    "Active teacher assignment already exists"
+            );
+        }
     }
 
     // Existing create method preserved.
