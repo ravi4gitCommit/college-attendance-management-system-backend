@@ -10,7 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
-
+import com.attendance.system.dto.response.StudentListResponse;
+import com.attendance.system.entity.StudentEnrollment;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -40,6 +41,45 @@ public class StudentService {
         return studentRepository.findAll()
                 .stream()
                 .filter(student -> isStudentInCollege(student, collegeId))
+                .toList();
+    }
+
+    // Get complete student information for the College Admin Students page.
+    public List<StudentListResponse> getAllStudentDetails(UUID adminUserId) {
+
+        Long collegeId = getAdminCollegeId(adminUserId);
+
+        return studentRepository.findAll()
+                .stream()
+                .filter(student -> isStudentInCollege(student, collegeId))
+                .map(student -> {
+
+                    User user = userService.findById(student.getUserId())
+                            .orElseThrow(() ->
+                                    new IllegalArgumentException("User not found"));
+
+                    Department department = departmentRepository.findById(
+                            student.getDepartmentId()
+                    ).orElseThrow(() ->
+                            new IllegalArgumentException("Department not found"));
+
+                    return new StudentListResponse(
+                            student.getId(),
+                            user.getFullName(),
+                            user.getEmail(),
+                            user.getMobile(),
+                            student.getRollNumber(),
+                            student.getRegistrationNumber(),
+                            department.getId(),
+                            department.getName(),
+                            department.getCode(),
+                            null,
+                            null,
+                            null,
+                            null,
+                            student.getStatus().name()
+                    );
+                })
                 .toList();
     }
 

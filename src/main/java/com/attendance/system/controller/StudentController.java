@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import java.util.List;
 import java.util.UUID;
-
+import com.attendance.system.dto.response.StudentListResponse;
 @RestController
 @RequestMapping("/api/v1/college-admin/students")
 @PreAuthorize("@roleService.isCollegeAdmin(authentication)")
@@ -24,15 +24,13 @@ public class StudentController {
 
     // Get all students belonging to the logged-in College Admin's college
     @GetMapping
-    public ResponseEntity<List<Student>> getAllStudents(
+    public ResponseEntity<List<StudentListResponse>> getAllStudents(
             Authentication authentication
     ) {
-
-        UUID adminUserId =
-                UUID.fromString(authentication.getName());
+        UUID adminUserId = UUID.fromString(authentication.getName());
 
         return ResponseEntity.ok(
-                studentService.getAllStudents(adminUserId)
+                studentService.getAllStudentDetails(adminUserId)
         );
     }
 
